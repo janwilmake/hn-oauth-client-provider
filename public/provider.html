@@ -1,8 +1,10 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>HackerNews OAuth Client Demo</title>
 </head>
+
 <body>
     <h1>HackerNews OAuth Client Demo</h1>
     <div id="content">
@@ -10,7 +12,7 @@
     </div>
 
     <script>
-        const OAUTH_PROVIDER = 'https://oauth.gcombinator.com';
+        const OAUTH_PROVIDER = 'https://hn.simplerauth.com';
         const CLIENT_ID = window.location.hostname; // Use current domain as client_id
 
         async function init() {
@@ -72,7 +74,7 @@
 
                 const userData = await response.json();
                 const user = userData.user;
-                
+
                 document.getElementById('content').innerHTML = `
                     <p>Welcome, ${user.username}!</p>
                     <p>Karma: ${user.karma || 0}</p>
@@ -111,4 +113,5 @@
         init();
     </script>
 </body>
+
 </html>

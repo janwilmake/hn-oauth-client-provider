@@ -2,6 +2,9 @@
 
 [![janwilmake/hn-oauth-client-provider context](https://badge.forgithub.com/janwilmake/hn-oauth-client-provider/tree/main/README.md)](https://uithub.com/janwilmake/hn-oauth-client-provider/tree/main/README.md)
 
+> [!WARNING]
+> This works in localhost, but in production on a cloudflare worker you'll quickly get ratelimited, forbidding any login, thus, unfortunatly, this concept won't work unless HN would whitelist me. If you want HN OAuth with a script as simple as [this](https://github.com/janwilmake/simplerauth-hn-oauth-client-demo), please tell HackerNews about this project and [reach out to me](https://x.com/janwilmake)
+
 This HackerNews OAuth client-provider uses the client's domain name as the client_id and automatically derives the `redirect_uri` from it (e.g., `https://example.com/callback`), eliminating the need for client registration while maintaining security through domain validation.
 
 ## Setup
@@ -21,11 +24,7 @@ npm i simplerauth-hn-provider
 ### Direct flow
 
 ```typescript
-import {
-  handleOAuth,
-  getAccessToken,
-  CodeDO,
-} from "simplerauth-hn-provider";
+import { handleOAuth, getAccessToken, CodeDO } from "simplerauth-hn-provider";
 export { CodeDO };
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

@@ -1,1 +1,2 @@
-HN_SESSION_KEY=your-secret-key-here-for-encrypting-session-data
+HN_SESSION_KEY=
+OXYLABS_CREDENTIALS=

@@ -345,7 +345,9 @@ async function handleAuthorize(
 
   const hnStateString = btoa(JSON.stringify(hnState));
 
-  const headers = new Headers({ Location: `/login?state=${encodeURIComponent(hnStateString)}` });
+  const headers = new Headers({
+    Location: `/login?state=${encodeURIComponent(hnStateString)}`,
+  });
   headers.append(
     "Set-Cookie",
     `oauth_state=${encodeURIComponent(
@@ -362,17 +364,12 @@ async function handleAuthorize(
   return new Response(null, { status: 302, headers });
 }
 
-async function handleLogin(
-  request: Request,
-  env: Env,
-  sameSite: string,
-): Promise<Response> {
-  const url = new URL(request.url);
-  const stateParam = url.searchParams.get("state");
+const getLoginHTML = (errorMessage = "", stateParam?: string) => {
+  const errorHtml = errorMessage
+    ? `<div style="margin-bottom: 20px; color: red;">${errorMessage}</div>`
+    : "";
 
-  if (request.method === "GET") {
-    // Show login form
-    const html = `<html lang="en">
+  return `<html lang="en">
 <head>
     <meta name="referrer" content="origin">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -383,11 +380,16 @@ async function handleLogin(
     <h1>HackerNews OAuth Login</h1>
     <p>Login with your HackerNews account to continue.</p>
     <br>
+    ${errorHtml}
     <b>Login</b>
     <br>
     <br>
     <form action="/login" method="post">
-        ${stateParam ? `<input type="hidden" name="state" value="${stateParam}">` : ''}
+        ${
+          stateParam
+            ? `<input type="hidden" name="state" value="${stateParam}">`
+            : ""
+        }
         <input type="hidden" name="goto" value="news">
         <table border="0">
             <tr>
@@ -406,36 +408,22 @@ async function handleLogin(
         <br>
         <input type="submit" value="login">
     </form>
-    <br>
-    <br>
-    <b>Create Account</b>
-    <br>
-    <br>
-    <form action="/login" method="post">
-        ${stateParam ? `<input type="hidden" name="state" value="${stateParam}">` : ''}
-        <input type="hidden" name="goto" value="news">
-        <input type="hidden" name="creating" value="t">
-        <table border="0">
-            <tr>
-                <td>username:</td>
-                <td>
-                    <input type="text" name="acct" size="20" autocorrect="off" spellcheck="false" autocapitalize="off">
-                </td>
-            </tr>
-            <tr>
-                <td>password:</td>
-                <td>
-                    <input type="password" name="pw" size="20">
-                </td>
-            </tr>
-        </table>
-        <br>
-        <input type="submit" value="create account">
-    </form>
+    <a href="https://news.ycombinator.com/login">Recover or create account on Hacker News</a>
 </body>
 </html>`;
+};
 
-    return new Response(html, {
+async function handleLogin(
+  request: Request,
+  env: Env,
+  sameSite: string,
+): Promise<Response> {
+  const url = new URL(request.url);
+  const stateParam = url.searchParams.get("state");
+
+  if (request.method === "GET") {
+    // Show login form
+    return new Response(getLoginHTML("", stateParam || undefined), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
@@ -451,29 +439,38 @@ async function handleLogin(
 
       const stateFromForm = params.get("state");
 
-      // Check if this is a registration attempt
-      const isRegistration = params.get("creating") === "t";
+      // Create minimal headers - only what's absolutely necessary
+      const minimalHeaders = new Headers();
+      minimalHeaders.set("Content-Type", "application/x-www-form-urlencoded");
 
-      // Forward all original headers that might be important
-      const headers = new Headers();
-      headers.set("Content-Type", "application/x-www-form-urlencoded");
-      headers.set("Origin", "https://news.ycombinator.com");
-      headers.set("Referer", "https://news.ycombinator.com/");
-      headers.set(
+      // Use a standard browser User-Agent that doesn't look like a bot
+      minimalHeaders.set(
         "User-Agent",
-        request.headers.get("User-Agent") ||
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       );
 
-      const proxyResponse = await fetch(
-        "https://news.ycombinator.com/login",
-        {
-          method: "POST",
-          headers: headers,
-          body: params.toString(),
-          redirect: "manual",
-        },
+      // Only add essential browser headers that a real browser would send
+      minimalHeaders.set(
+        "Accept",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       );
+      minimalHeaders.set("Accept-Language", "en-US,en;q=0.5");
+      minimalHeaders.set("Accept-Encoding", "gzip, deflate, br");
+
+      // Set origin and referer to match a real browser request
+      minimalHeaders.set("Origin", "https://news.ycombinator.com");
+      minimalHeaders.set("Referer", "https://news.ycombinator.com/login");
+
+      params.delete("state");
+
+      const proxyResponse = await fetch("https://news.ycombinator.com/login", {
+        method: "POST",
+        headers: minimalHeaders,
+        body: params.toString(),
+        redirect: "manual",
+        // Disable any automatic compression/decompression that might alter headers
+        compress: false,
+      });
 
       if (proxyResponse.status === 302) {
         // Get the redirect location
@@ -483,10 +480,10 @@ async function handleLogin(
           // Success! Extract session cookie from HN response
           const setCookieHeader = proxyResponse.headers.get("Set-Cookie");
           let hnSessionCookie = "";
-          
+
           if (setCookieHeader) {
             // Extract the session cookie (usually 'user' cookie from HN)
-            const cookies = setCookieHeader.split(';');
+            const cookies = setCookieHeader.split(";");
             for (const cookie of cookies) {
               if (cookie.trim().startsWith("user=")) {
                 hnSessionCookie = cookie.trim();
@@ -498,13 +495,26 @@ async function handleLogin(
           // Get username from form
           const username = params.get("acct");
           if (!username) {
-            return new Response("Username required", { status: 400 });
+            return new Response(
+              getLoginHTML("Username required", stateFromForm || undefined),
+              {
+                headers: { "Content-Type": "text/html; charset=utf-8" },
+              },
+            );
           }
 
           // Fetch user profile from HN
           const user = await fetchHNUserProfile(username, hnSessionCookie);
           if (!user) {
-            return new Response("Failed to fetch user profile", { status: 400 });
+            return new Response(
+              getLoginHTML(
+                "Failed to fetch user profile",
+                stateFromForm || undefined,
+              ),
+              {
+                headers: { "Content-Type": "text/html; charset=utf-8" },
+              },
+            );
           }
 
           // Encrypt the session cookie as our access token
@@ -520,21 +530,45 @@ async function handleLogin(
           await userDO.setUser(user, hnSessionCookie, encryptedAccessToken);
 
           // Handle OAuth flow completion
-          return await handleLoginSuccess(request, env, sameSite, stateFromForm, encryptedAccessToken);
+          return await handleLoginSuccess(
+            request,
+            env,
+            sameSite,
+            stateFromForm,
+            encryptedAccessToken,
+          );
         }
       }
 
       // Get the response body to check for errors or success
       const responseText = await proxyResponse.text();
 
-      // For status 200, return the HTML response directly (for both login and registration)
-      if (proxyResponse.status === 200) {
-        // Check for common error messages and re-render with errors
-        if (responseText.includes("Bad login") || responseText.includes("That username is taken")) {
-          const errorMsg = responseText.includes("Bad login") ? "Invalid username or password" : "Username already taken";
-          return new Response(responseText.replace("<body>", `<body><div style="color: red; margin: 10px 0;">${errorMsg}</div>`), {
+      console.log("no 302", proxyResponse.status, responseText);
+      // Handle 403 error - likely IP-based blocking
+      if (proxyResponse.status === 403) {
+        return new Response(
+          getLoginHTML("Bad login.", stateFromForm || undefined),
+          {
             headers: { "Content-Type": "text/html; charset=utf-8" },
-          });
+          },
+        );
+      }
+
+      // For status 200, check for common error messages
+      if (proxyResponse.status === 200) {
+        if (
+          responseText.includes("Bad login") ||
+          responseText.includes("That username is taken")
+        ) {
+          const errorMsg = responseText.includes("Bad login")
+            ? "Invalid username or password"
+            : "Username already taken";
+          return new Response(
+            getLoginHTML(errorMsg, stateFromForm || undefined),
+            {
+              headers: { "Content-Type": "text/html; charset=utf-8" },
+            },
+          );
         }
 
         return new Response(responseText, {
@@ -543,18 +577,18 @@ async function handleLogin(
       }
 
       // Return error for debugging
-      const action = isRegistration ? "Registration" : "Login";
       return new Response(
-        `${action} failed - Status: ${proxyResponse.status}`,
+        getLoginHTML(
+          "Login failed - please try again",
+          stateFromForm || undefined,
+        ),
         {
-          status: 400,
-          headers: { "Content-Type": "text/plain" },
+          headers: { "Content-Type": "text/html; charset=utf-8" },
         },
       );
     } catch (error) {
-      return new Response("Error: " + error.message, {
-        status: 500,
-        headers: { "Content-Type": "text/plain" },
+      return new Response(getLoginHTML("Error: " + error.message), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
       });
     }
   }
@@ -634,22 +668,28 @@ async function handleLoginSuccess(
   return new Response(null, { status: 302, headers });
 }
 
-async function fetchHNUserProfile(username: string, sessionCookie: string): Promise<HNUser | null> {
+async function fetchHNUserProfile(
+  username: string,
+  sessionCookie: string,
+): Promise<HNUser | null> {
   try {
     // Fetch user profile from HN
-    const response = await fetch(`https://news.ycombinator.com/user?id=${username}`, {
-      headers: {
-        Cookie: sessionCookie,
-        "User-Agent": "Mozilla/5.0 (compatible; HN-OAuth-Provider/1.0)",
+    const response = await fetch(
+      `https://news.ycombinator.com/user?id=${username}`,
+      {
+        headers: {
+          Cookie: sessionCookie,
+          "User-Agent": "Mozilla/5.0 (compatible; HN-OAuth-Provider/1.0)",
+        },
       },
-    });
+    );
 
     if (!response.ok) {
       return null;
     }
 
     const html = await response.text();
-    
+
     // Parse the HTML to extract user information
     // This is a basic parser - you might want to use a proper HTML parser
     const user: HNUser = {
@@ -676,7 +716,7 @@ async function fetchHNUserProfile(username: string, sessionCookie: string): Prom
     // Extract about section
     const aboutMatch = html.match(/about:\s*<\/td><td[^>]*>(.*?)<\/td>/s);
     if (aboutMatch) {
-      user.about = aboutMatch[1].replace(/<[^>]*>/g, '').trim();
+      user.about = aboutMatch[1].replace(/<[^>]*>/g, "").trim();
     }
 
     return user;
@@ -698,7 +738,10 @@ async function createAuthCodeAndRedirect(
   const authCode = generateCodeVerifier(); // Reuse the same random generation
 
   // Decrypt to get HN session cookie
-  const hnSessionCookie = await decrypt(encryptedAccessToken, env.HN_SESSION_KEY);
+  const hnSessionCookie = await decrypt(
+    encryptedAccessToken,
+    env.HN_SESSION_KEY,
+  );
 
   // Create Durable Object for this auth code with "code:" prefix
   const id = env.CODES.idFromName(`code:${authCode}`);

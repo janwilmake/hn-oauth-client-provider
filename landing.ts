@@ -1,24 +1,21 @@
 import { CodeDO, withSimplerAuth } from "./hn-oauth-client-provider";
 export { CodeDO };
 
-// Simple markdown parser
-function parseMarkdown(markdown) {
+// Simple markdown parser with syntax highlighting support
+function parseMarkdown(markdown: string): string {
   let html = markdown;
 
-  // Escape HTML to prevent rendering
-  html = html
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-
-  // Code blocks with syntax highlighting (```lang blocks)
+  // Extract and temporarily replace code blocks to prevent them from being processed by other rules
+  const codeBlocks: string[] = [];
   html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
-    return `<pre><code class="language-${
-      lang || "plain"
-    }">${code.trim()}</code></pre>`;
+    const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`;
+    const escapedCode = escapeHtml(code.trim());
+    const langClass = lang ? ` class="language-${lang}"` : "";
+    codeBlocks.push(`<pre><code${langClass}>${escapedCode}</code></pre>`);
+    return placeholder;
   });
 
-  // Inline code
+  // Inline code (must come before other processing)
   html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
 
   // Headers
@@ -27,30 +24,49 @@ function parseMarkdown(markdown) {
   html = html.replace(/^# (.*$)/gm, "<h1>$1</h1>");
 
   // Bold and italic
-  html = html.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/\*(.*?)\*/g, "<em>$1</em>");
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
 
   // Links
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
 
   // Lists
-  html = html.replace(/^\* (.*$)/gm, "<li>$1</li>");
+  html = html.replace(/^\* (.+$)/gm, "<li>$1</li>");
   html = html.replace(/(<li>.*<\/li>)/s, "<ul>$1</ul>");
+  html = html.replace(/<\/li>\s*<ul>/g, "</li>");
+  html = html.replace(/<\/ul>\s*<li>/g, "<li>");
 
-  // Paragraphs
-  html = html.replace(/\n\n/g, "</p><p>");
-  html = "<p>" + html + "</p>";
+  // Numbered lists
+  html = html.replace(/^\d+\. (.+$)/gm, "<li>$1</li>");
+  html = html.replace(/(<li>.*<\/li>)/s, (match) => {
+    if (!match.includes("<ul>")) {
+      return `<ol>${match}</ol>`;
+    }
+    return match;
+  });
 
-  // Clean up empty paragraphs
-  html = html.replace(/<p><\/p>/g, "");
-  html = html.replace(/<p>(<h[1-6]>)/g, "$1");
-  html = html.replace(/(<\/h[1-6]>)<\/p>/g, "$1");
-  html = html.replace(/<p>(<ul>)/g, "$1");
-  html = html.replace(/(<\/ul>)<\/p>/g, "$1");
-  html = html.replace(/<p>(<pre>)/g, "$1");
-  html = html.replace(/(<\/pre>)<\/p>/g, "$1");
+  // Paragraphs (must come after other block elements)
+  html = html.replace(/^([^<\n].+$)/gm, "<p>$1</p>");
+
+  // Clean up extra newlines and spaces
+  html = html.replace(/\n\s*\n/g, "\n");
+
+  // Restore code blocks
+  codeBlocks.forEach((block, index) => {
+    html = html.replace(`__CODE_BLOCK_${index}__`, block);
+  });
 
   return html;
+}
+
+function escapeHtml(text: string): string {
+  const div = new Array();
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 export default {
@@ -60,200 +76,64 @@ export default {
 
       if (url.pathname === "/blog") {
         try {
-          // Fetch blog content from assets
+          // Fetch the blog.md file from assets
           const blogResponse = await env.ASSETS.fetch(
-            new Request(`${url.origin}/blog.md`),
+            new URL("/blog.md", request.url),
           );
 
           if (!blogResponse.ok) {
-            return new Response("Blog not found", { status: 404 });
+            throw new Error("Blog post not found");
           }
 
-          const blogMarkdown = await blogResponse.text();
-          const blogHtml = parseMarkdown(blogMarkdown);
+          const markdownContent = await blogResponse.text();
+          const htmlContent = parseMarkdown(markdownContent);
 
-          return new Response(
-            `
-<!DOCTYPE html>
+          const blogHtml = `<!DOCTYPE html>
 <html lang="en">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>blog - simpler auth</title>
-<style>
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  line-height: 1.6;
-  color: #333;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 20px;
-  background: #fafafa;
-}
-
-header {
-  text-align: center;
-  margin-bottom: 40px;
-  padding-bottom: 20px;
-  border-bottom: 2px solid #eee;
-}
-
-header h1 {
-  font-size: 2.5em;
-  margin-bottom: 10px;
-  color: #2c3e50;
-}
-
-header p {
-  font-size: 1.1em;
-  color: #666;
-  margin: 10px 0;
-}
-
-header a {
-  display: inline-block;
-  padding: 12px 24px;
-  background: #3498db;
-  color: white;
-  text-decoration: none;
-  border-radius: 6px;
-  margin-top: 15px;
-  transition: background 0.3s;
-}
-
-header a:hover {
-  background: #2980b9;
-}
-
-main {
-  background: white;
-  padding: 30px;
-  border-radius: 8px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-}
-
-h1, h2, h3 {
-  color: #2c3e50;
-  margin-top: 30px;
-  margin-bottom: 15px;
-}
-
-h1 { font-size: 2em; }
-h2 { font-size: 1.5em; }
-h3 { font-size: 1.3em; }
-
-p {
-  margin-bottom: 15px;
-  text-align: justify;
-}
-
-ul {
-  margin: 15px 0;
-  padding-left: 20px;
-}
-
-li {
-  margin-bottom: 8px;
-}
-
-pre {
-  background: #2d3748;
-  color: #e2e8f0;
-  padding: 20px;
-  border-radius: 8px;
-  overflow-x: auto;
-  margin: 20px 0;
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-code {
-  background: #f7fafc;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-  font-size: 0.9em;
-  color: #d63384;
-}
-
-pre code {
-  background: none;
-  padding: 0;
-  color: inherit;
-  border-radius: 0;
-}
-
-/* Syntax highlighting */
-.language-javascript code,
-.language-js code {
-  color: #e2e8f0;
-}
-
-.language-html code {
-  color: #81c784;
-}
-
-.language-css code {
-  color: #64b5f6;
-}
-
-.language-json code {
-  color: #ffb74d;
-}
-
-a {
-  color: #3498db;
-  text-decoration: none;
-}
-
-a:hover {
-  text-decoration: underline;
-}
-
-blockquote {
-  border-left: 4px solid #3498db;
-  margin: 20px 0;
-  padding: 10px 20px;
-  background: #f8f9fa;
-  font-style: italic;
-}
-
-footer {
-  text-align: center;
-  margin-top: 40px;
-  padding: 20px;
-  color: #666;
-  border-top: 1px solid #eee;
-}
-
-footer a {
-  color: #3498db;
-  font-weight: 500;
-}
-</style>
+<title>Building a HackerNews OAuth Provider - simpler auth</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/javascript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/html.min.js"></script>
 
 <body>
     <header>
-        <h1>simpler auth</h1>
+        <h1><a href="/" style="color: inherit; text-decoration: none;">simpler auth</a></h1>
         <p>oauth templates for cloudflare workers</p>
-        <a href="/">← back to home</a>
     </header>
 
-    <main>
-        ${blogHtml}
+    <main class="blog-content">
+        ${htmlContent}
     </main>
 
     <footer>
         <p>built by <a href="https://x.com/janwilmake">janwilmake</a> because auth doesn't need to be complicated</p>
+        <p><a href="/">← back to home</a></p>
     </footer>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', (event) => {
+            hljs.highlightAll();
+        });
+    </script>
 </body>
-</html>`,
+</html>`;
+
+          return new Response(blogHtml, {
+            headers: { "Content-Type": "text/html" },
+          });
+        } catch (error) {
+          return new Response(
+            `<html><body><h1>Error</h1><p>Could not load blog post: ${error.message}</p><a href="/">← back to home</a></body></html>`,
             {
-              headers: { "Content-Type": "text/html;charset=utf8" },
+              status: 500,
+              headers: { "Content-Type": "text/html" },
             },
           );
-        } catch (error) {
-          return new Response("Error loading blog", { status: 500 });
         }
       }
 
@@ -279,7 +159,7 @@ footer a {
 
            <p><a href="https://github.com/janwilmake/hn-oauth-client-provider">check the repo</a></p>
           </body></html>`,
-          { headers: { "Content-Type": "text/html" } },
+          { headers: { "Content-type": "text/html" } },
         );
       }
 
@@ -296,8 +176,7 @@ footer a {
         ${ctx.user?.about ? `<p>About: ${ctx.user.about}</p>` : ""}
         <a href="/logout">Logout</a><br>
         <a href="/provider">Try provider flow example</a><br>
-        <a href="/api/user">View raw user data (JSON)</a><br>
-        <a href="/blog">Read blog</a>
+        <a href="/api/user">View raw user data (JSON)</a>
       </body></html>`,
         { headers: { "Content-Type": "text/html;charset=utf8" } },
       );

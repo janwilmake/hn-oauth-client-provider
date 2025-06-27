@@ -1,488 +1,511 @@
-# Building a HackerNews OAuth Provider from First Principles
+# Building a HackerNews OAuth Provider: From Proxy POC to Production
 
-_Or: How I learned to stop worrying and love distributed authentication_
+Or: How a simple login proxy evolved into a full OAuth provider that requires no client registration
 
-I've always been fascinated by authentication systems, especially OAuth. But every time I tried to understand OAuth 2.0, I got lost in the RFCs and abstract concepts. So I decided to build my own OAuth provider from scratch - using HackerNews as the identity source. This is the story of how I went from "OAuth is confusing" to "OAuth makes perfect sense" by building it step by step.
+I was working on a project that needed HackerNews authentication when I stumbled upon something interesting: HN's login form can be used programmatically. This discovery led me down a rabbit hole that ended with building a complete OAuth 2.0 provider. Here's how it all unfolded.
 
-## The Problem: I Want to Build Cool Stuff with HN Data
+## The Lightbulb Moment: HN Login as a Proxy
 
-Let's say I want to build a tool that analyzes your HackerNews comment history to generate insights about your interests. For this to work, I need access to your HN account. But how?
+It started with a simple question: "Can I proxy HackerNews login requests?" Turns out, the answer is yes:
 
-### Attempt 1: Just Ask for Passwords
+```javascript
+// The POC that started it all
+export default {
+  async fetch(request, env, ctx) {
+    if (request.method === "POST" && url.pathname === "/login") {
+      // Convert form data and forward to HN
+      const formData = await request.formData();
+      const params = new URLSearchParams();
+      for (const [key, value] of formData.entries()) {
+        params.append(key, value);
+      }
 
-The naive approach: just ask users for their HN username and password.
+      const proxyResponse = await fetch("https://news.ycombinator.com/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Origin: "https://news.ycombinator.com",
+          Referer: "https://news.ycombinator.com/",
+        },
+        body: params.toString(),
+        redirect: "manual",
+      });
 
-```html
-<form>
-  <input type="text" placeholder="HN Username" />
-  <input type="password" placeholder="HN Password" />
-  <button>Access My HN Data</button>
-</form>
+      if (proxyResponse.status === 302) {
+        const location = proxyResponse.headers.get("Location");
+        if (location && location.includes("news")) {
+          return new Response("Login successful!", { status: 200 });
+        }
+      }
+    }
+
+    // Show login form
+    return new Response(loginFormHTML, {
+      headers: { "Content-Type": "text/html" },
+    });
+  },
+};
 ```
 
-**Problems:**
+**The breakthrough**: HackerNews returns a 302 redirect to `/news` on successful login, and includes a session cookie in the response headers. This meant I could programmatically authenticate users and capture their session tokens!
 
-- Users have to trust me with their actual HN password
-- If my app gets hacked, all user passwords are compromised
-- I get full access to their account (can post, change settings, etc.)
-- No way to revoke access without changing their HN password
+## From Proxy to OAuth Provider
 
-This is clearly terrible. We need something better.
+Once I realized I could authenticate users programmatically, the next logical step was building a proper OAuth provider around it. But I wanted to solve a fundamental problem with OAuth: client registration.
 
-### Attempt 2: Manual Token Generation
+### The Registration Problem
 
-What if HackerNews had API tokens that users could generate manually?
+Traditional OAuth providers require developers to:
 
-```
-1. User goes to HN settings
-2. Generates an API token: "hn_token_abc123xyz"
-3. Copies token into my app
-4. My app uses token to access their data
-```
+1. Sign up for an account
+2. Register their application
+3. Get a client ID and secret
+4. Configure redirect URIs
+5. Wait for approval
 
-This is more secure, but the user experience is awful. Nobody wants to manually copy-paste tokens every time they use an app.
+This creates friction that kills many integrations before they start.
 
-## Enter OAuth: The Automated Token Dance
+### The Solution: Domain-Based Client IDs
 
-OAuth solves this by automating the token generation process. Instead of users manually creating tokens, my app can request them automatically - but only after the user explicitly grants permission.
-
-Here's what I want to happen:
-
-```
-1. User clicks "Connect HN Account" in my app
-2. They get redirected to a HN login page
-3. HN asks: "Do you want to give MyApp access to your data?"
-4. User clicks "Yes"
-5. User gets redirected back to my app with access granted
-6. My app can now access their HN data
-```
-
-But since HackerNews doesn't have OAuth built-in, I'll build my own OAuth provider that bridges to HN's cookie-based authentication.
-
-## Building the OAuth Provider: Attack and Defend
-
-Let me build this step by step, starting with a horribly insecure version and then fixing each vulnerability.
-
-### Version 1: The "Trust Me Bro" Approach
+What if the client's domain _is_ their client ID? Here's how it works:
 
 ```typescript
-// Terrible first attempt
-app.get("/authorize", (req, res) => {
-  const { client_id, redirect_uri } = req.query;
+// No registration required!
+const CLIENT_ID = "myapp.com";
+const REDIRECT_URI = "https://myapp.com/callback";
 
-  // Just generate a token and redirect back
-  const access_token = generateRandomToken();
-  res.redirect(`${redirect_uri}?access_token=${access_token}`);
-});
-```
-
-**Attack #1: Anyone can pretend to be anyone**
-
-Malicious App could just call:
-
-```
-GET /authorize?client_id=TrustedApp&redirect_uri=https://malicious.com
-```
-
-And my provider would happily give them a token claiming to be TrustedApp!
-
-**Fix: Require actual user authentication**
-
-```typescript
-app.get("/authorize", async (req, res) => {
-  const { client_id, redirect_uri } = req.query;
-
-  // Check if user is already logged in
-  const user = await getCurrentUser(req);
-  if (!user) {
-    // Redirect to login page
-    return res.redirect(`/login?redirect_to=${encodeURIComponent(req.url)}`);
-  }
-
-  // Show consent screen
-  res.render("consent", { client_id, redirect_uri });
-});
-```
-
-### Version 2: With Authentication, But Still Broken
-
-Now I have a login flow that actually authenticates with HackerNews:
-
-```typescript
-app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
-
-  // Forward login to HackerNews
-  const hnResponse = await fetch("https://news.ycombinator.com/login", {
-    method: "POST",
-    body: new URLSearchParams({ acct: username, pw: password }),
-  });
-
-  if (hnResponse.ok) {
-    // Extract HN session cookie
-    const sessionCookie = extractSessionCookie(hnResponse);
-
-    // Create our own access token
-    const accessToken = await encrypt(sessionCookie, SECRET_KEY);
-
-    // Redirect back to OAuth flow
-    res.redirect(originalOAuthRequest);
-  }
-});
-```
-
-**Attack #2: Redirect URI hijacking**
-
-Evil Corp could initiate an OAuth flow but point the redirect to their own domain:
-
-```
-https://myoauth.com/authorize?client_id=GoodApp&redirect_uri=https://evil-corp.com/steal-tokens
-```
-
-When the user approves, their access token gets sent to Evil Corp instead of GoodApp!
-
-**Fix: Validate redirect URIs**
-
-I need to ensure that the `redirect_uri` actually belongs to the `client_id`. Since I'm using domain-based client IDs, this is straightforward:
-
-```typescript
+// Security through domain ownership validation
 function validateRedirectUri(clientId: string, redirectUri: string): boolean {
   const redirectUrl = new URL(redirectUri);
 
-  // Redirect URI must be HTTPS
-  if (redirectUrl.protocol !== "https:") return false;
+  // Must be HTTPS (except localhost for dev)
+  if (redirectUrl.protocol !== "https:" && clientId !== "localhost") {
+    return false;
+  }
 
-  // Redirect URI must be on same domain as client_id
-  if (redirectUrl.hostname !== clientId) return false;
+  // Must be on same domain as client_id
+  if (redirectUrl.hostname !== clientId) {
+    return false;
+  }
 
   return true;
 }
 ```
 
-### Version 3: Secure Redirects, But Tokens in URLs
+**The magic**: Anyone can use `myapp.com` as their client ID, but they can only redirect to URLs on `myapp.com`. Since they control that domain, they're the legitimate client. No registration needed!
 
-**Attack #3: Token leakage through browser history**
+## The Complete OAuth Implementation
 
-Even with proper redirect validation, access tokens in URLs are dangerous:
+Here's how I built the full OAuth 2.0 Authorization Code flow with PKCE:
 
-```
-https://goodapp.com/callback?access_token=sensitive_token_here
-```
-
-This token will show up in:
-
-- Browser history
-- Server logs
-- Referrer headers if the user clicks any external links
-
-**Fix: Authorization Code Flow**
-
-Instead of putting tokens directly in URLs, I'll use a two-step process:
-
-1. Put a short-lived "authorization code" in the URL
-2. App exchanges this code for an access token via a server-to-server request
+### 1. Authorization Endpoint
 
 ```typescript
-// Step 1: Give authorization code
-app.get("/authorize", async (req, res) => {
-  // ... authentication and validation ...
+async function handleAuthorize(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const clientId = url.searchParams.get("client_id");
+  const redirectUri = url.searchParams.get("redirect_uri");
+  const state = url.searchParams.get("state");
 
-  const authCode = generateShortLivedCode();
-  await storeAuthCode(authCode, { userId, clientId, redirectUri });
-
-  res.redirect(`${redirectUri}?code=${authCode}`);
-});
-
-// Step 2: Exchange code for token
-app.post("/token", async (req, res) => {
-  const { code, client_id, redirect_uri } = req.body;
-
-  const authData = await getAuthCode(code);
-  if (!authData || authData.clientId !== client_id) {
-    return res.status(400).json({ error: "invalid_grant" });
+  // Validate domain-based client ID
+  if (!isValidDomain(clientId) && clientId !== "localhost") {
+    return new Response("Invalid client_id: must be a valid domain", {
+      status: 400,
+    });
   }
 
-  const accessToken = await generateAccessToken(authData.userId);
-  res.json({ access_token: accessToken, token_type: "bearer" });
-});
-```
-
-### Version 4: Authorization Codes, But Still Vulnerable
-
-**Attack #4: Code interception and replay**
-
-If someone can intercept the authorization code (through network sniffing, malware, etc.), they could exchange it for an access token before the legitimate app does.
-
-**Fix: Proof Key for Code Exchange (PKCE)**
-
-The app generates a random secret, hashes it, and includes the hash in the initial request. When exchanging the code, it provides the original secret to prove it's the same client:
-
-```typescript
-// Client side: Generate PKCE challenge
-const codeVerifier = generateRandomString();
-const codeChallenge = sha256(codeVerifier);
-
-// Initial request includes challenge
-const authUrl =
-  `https://myoauth.com/authorize?` +
-  `client_id=myapp.com&` +
-  `redirect_uri=https://myapp.com/callback&` +
-  `code_challenge=${codeChallenge}&` +
-  `code_challenge_method=S256`;
-
-// Later, when exchanging code:
-fetch("/token", {
-  method: "POST",
-  body: new URLSearchParams({
-    grant_type: "authorization_code",
-    code: authCode,
-    client_id: "myapp.com",
-    code_verifier: codeVerifier, // Original secret
-  }),
-});
-```
-
-On the server side:
-
-```typescript
-app.post("/token", async (req, res) => {
-  const { code, code_verifier, client_id } = req.body;
-
-  const authData = await getAuthCode(code);
-
-  // Verify PKCE
-  const expectedChallenge = sha256(code_verifier);
-  if (authData.codeChallenge !== expectedChallenge) {
-    return res.status(400).json({ error: "invalid_grant" });
+  // Validate redirect URI matches client domain
+  if (!validateRedirectUri(clientId, redirectUri)) {
+    return new Response(
+      "Invalid redirect_uri: must be on same domain as client_id",
+      { status: 400 },
+    );
   }
 
-  // ... rest of token exchange ...
-});
-```
+  // Check if user is already authenticated
+  const accessToken = getAccessToken(request);
+  if (accessToken) {
+    return await createAuthCodeAndRedirect(
+      env,
+      clientId,
+      redirectUri,
+      state,
+      accessToken,
+    );
+  }
 
-### Attack #5: CSRF - The Sneaky Account Linkage
-
-**Attack: Cross-Site Request Forgery**
-
-Evil Corp could trick a user into unknowingly linking Evil Corp's HN account to their own app account:
-
-1. Evil Corp starts OAuth flow with my app, gets redirected to login
-2. Instead of logging in, they send the authorization URL to victims
-3. Victim clicks link, sees it's my legitimate domain, logs in with their own HN account
-4. But the OAuth flow was initiated by Evil Corp, so victim's HN account gets linked to Evil Corp's app account
-5. Victim uploads private data, thinking it's going to their own account, but it actually goes to Evil Corp's account
-
-**Fix: State parameter**
-
-The client includes a random `state` parameter that gets round-tripped through the entire flow:
-
-```typescript
-// Client generates random state
-const state = generateRandomString();
-sessionStorage.setItem("oauth_state", state);
-
-const authUrl =
-  `https://myoauth.com/authorize?` +
-  `client_id=myapp.com&` +
-  `state=${state}&` +
-  `...`;
-
-// In callback, verify state matches
-const urlParams = new URLSearchParams(window.location.search);
-const returnedState = urlParams.get("state");
-const expectedState = sessionStorage.getItem("oauth_state");
-
-if (returnedState !== expectedState) {
-  throw new Error("CSRF attack detected!");
+  // Redirect to HN login
+  const loginState = btoa(JSON.stringify({ clientId, redirectUri, state }));
+  return new Response(null, {
+    status: 302,
+    headers: { Location: `/login?state=${encodeURIComponent(loginState)}` },
+  });
 }
 ```
 
-## The Final, Secure Implementation
-
-After all these fixes, here's what my OAuth flow looks like:
+### 2. Login Handler (The Proxy Magic)
 
 ```typescript
-// 1. Authorization request with PKCE and state
-app.get("/authorize", async (req, res) => {
-  const { client_id, redirect_uri, code_challenge, state } = req.query;
+async function handleLogin(request: Request, env: Env): Promise<Response> {
+  if (request.method === "POST") {
+    const formData = await request.formData();
+    const params = new URLSearchParams();
+    for (const [key, value] of formData.entries()) {
+      params.append(key, value);
+    }
 
-  // Validate client and redirect URI
-  if (
-    !isValidDomain(client_id) ||
-    !validateRedirectUri(client_id, redirect_uri)
-  ) {
-    return res.status(400).send("Invalid client or redirect URI");
+    // Forward to HackerNews
+    const proxyResponse = await fetch("https://news.ycombinator.com/login", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Origin: "https://news.ycombinator.com",
+        Referer: "https://news.ycombinator.com/",
+      },
+      body: params.toString(),
+      redirect: "manual",
+    });
+
+    if (proxyResponse.status === 302) {
+      const location = proxyResponse.headers.get("Location");
+      if (location && location.includes("news")) {
+        // Success! Extract session cookie
+        const setCookieHeader = proxyResponse.headers.get("Set-Cookie");
+        const hnSessionCookie = extractSessionCookie(setCookieHeader);
+
+        // Get username and fetch user profile
+        const username = params.get("acct");
+        const user = await fetchHNUserProfile(username, hnSessionCookie);
+
+        // Create encrypted access token
+        const encryptedAccessToken = await encrypt(
+          hnSessionCookie,
+          env.HN_SESSION_KEY,
+        );
+
+        // Store user data in Durable Object
+        const userDOId = env.CODES.idFromName(`user:${encryptedAccessToken}`);
+        const userDO = env.CODES.get(userDOId);
+        await userDO.setUser(user, hnSessionCookie, encryptedAccessToken);
+
+        return await handleOAuthSuccess(request, env, encryptedAccessToken);
+      }
+    }
   }
 
-  // Check authentication
-  const user = await getCurrentUser(req);
-  if (!user) {
-    return res.redirect(
-      `/login?state=${encodeURIComponent(
-        JSON.stringify({
-          clientId: client_id,
-          redirectUri: redirect_uri,
-          codeChallenge: code_challenge,
-          state,
-        }),
-      )}`,
-    );
-  }
-
-  // Generate authorization code
-  const authCode = generateRandomString();
-  await storeDurableObject(authCode, {
-    userId: user.id,
-    clientId: client_id,
-    redirectUri: redirect_uri,
-    codeChallenge: code_challenge,
-    expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
+  // Show login form
+  return new Response(loginFormHTML, {
+    headers: { "Content-Type": "text/html" },
   });
-
-  // Redirect with code and state
-  const callbackUrl = new URL(redirect_uri);
-  callbackUrl.searchParams.set("code", authCode);
-  if (state) callbackUrl.searchParams.set("state", state);
-
-  res.redirect(callbackUrl.toString());
-});
-
-// 2. Token exchange with PKCE verification
-app.post("/token", async (req, res) => {
-  const { grant_type, code, client_id, code_verifier } = req.body;
-
-  if (grant_type !== "authorization_code") {
-    return res.status(400).json({ error: "unsupported_grant_type" });
-  }
-
-  // Get and validate auth code
-  const authData = await getDurableObject(code);
-  if (!authData || authData.expiresAt < Date.now()) {
-    return res.status(400).json({ error: "invalid_grant" });
-  }
-
-  // Verify PKCE
-  const expectedChallenge = await sha256(code_verifier);
-  if (authData.codeChallenge !== expectedChallenge) {
-    return res.status(400).json({ error: "invalid_grant" });
-  }
-
-  // Generate access token (encrypted HN session)
-  const user = await getUser(authData.userId);
-  const accessToken = await encrypt(user.hnSessionCookie, HN_SESSION_KEY);
-
-  // Clean up auth code
-  await deleteDurableObject(code);
-
-  res.json({
-    access_token: accessToken,
-    token_type: "bearer",
-    scope: "read",
-  });
-});
+}
 ```
 
-## The Magic: No Client Registration Required
+### 3. Token Exchange
 
-Here's the clever part of my implementation: I use the client's domain name as their `client_id`. This eliminates the need for a registration process while maintaining security:
+```typescript
+async function handleToken(request: Request, env: Env): Promise<Response> {
+  const formData = await request.formData();
+  const code = formData.get("code");
+  const clientId = formData.get("client_id");
+  const codeVerifier = formData.get("code_verifier");
 
-- `client_id`: `myapp.com`
-- Default `redirect_uri`: `https://myapp.com/callback`
-- Validation: Redirect URI must be on same domain as client_id
+  // Get auth code data from Durable Object
+  const authCodeDO = env.CODES.get(env.CODES.idFromName(`code:${code}`));
+  const authData = await authCodeDO.getAuthData();
 
-This means any developer can integrate with my OAuth provider immediately, without signing up or getting API keys. They just use their domain as the client ID.
+  if (!authData || authData.clientId !== clientId) {
+    return new Response(JSON.stringify({ error: "invalid_grant" }), {
+      status: 400,
+    });
+  }
 
-## Usage Examples
+  // Verify PKCE (if provided)
+  if (codeVerifier && authData.codeChallenge) {
+    const expectedChallenge = await sha256(codeVerifier);
+    if (authData.codeChallenge !== expectedChallenge) {
+      return new Response(JSON.stringify({ error: "invalid_grant" }), {
+        status: 400,
+      });
+    }
+  }
 
-### For App Developers
+  return new Response(
+    JSON.stringify({
+      access_token: authData.access_token,
+      token_type: "bearer",
+      scope: "read",
+    }),
+  );
+}
+```
+
+## MCP Compliance: OAuth for AI Agents
+
+One of the coolest features is full Model Context Protocol (MCP) compliance. This means AI agents can automatically discover and use the OAuth provider:
+
+```typescript
+// OAuth 2.0 Authorization Server Metadata (RFC 8414)
+if (path === "/.well-known/oauth-authorization-server") {
+  const metadata = {
+    issuer: baseUrl,
+    authorization_endpoint: `${baseUrl}/authorize`,
+    token_endpoint: `${baseUrl}/token`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code"],
+    code_challenge_methods_supported: ["S256"],
+    scopes_supported: ["read"],
+    token_endpoint_auth_methods_supported: ["none"],
+  };
+
+  return new Response(JSON.stringify(metadata), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+// OAuth 2.0 Protected Resource Metadata (RFC 9728)
+if (path === "/.well-known/oauth-protected-resource") {
+  const metadata = {
+    resource: baseUrl,
+    authorization_servers: [baseUrl],
+    bearer_methods_supported: ["header"],
+    resource_documentation: `${baseUrl}`,
+  };
+
+  return new Response(JSON.stringify(metadata), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
+```
+
+## Using the OAuth Provider
+
+### For Client Apps
 
 ```javascript
-// 1. Redirect user to authorization
-const authUrl =
-  "https://hn.simplerauth.com/authorize?" +
-  new URLSearchParams({
-    client_id: "myapp.com",
-    redirect_uri: "https://myapp.com/callback",
-    response_type: "code",
-    state: randomState,
-    code_challenge: codeChallenge,
-    code_challenge_method: "S256",
+// 1. Start OAuth flow
+const authUrl = new URL("https://hn.simplerauth.com/authorize");
+authUrl.searchParams.set("client_id", "news.gcombinator.com");
+authUrl.searchParams.set(
+  "redirect_uri",
+  "https://news.gcombinator.com/callback",
+);
+authUrl.searchParams.set("response_type", "code");
+authUrl.searchParams.set("state", generateRandomState());
+
+window.location.href = authUrl.toString();
+
+// 2. Handle callback
+async function handleCallback() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const code = urlParams.get("code");
+
+  // Exchange code for token
+  const tokenResponse = await fetch("https://hn.simplerauth.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code: code,
+      client_id: "news.gcombinator.com",
+      redirect_uri: "https://news.gcombinator.com/callback",
+    }),
   });
 
-window.location.href = authUrl;
+  const { access_token } = await tokenResponse.json();
 
-// 2. Handle callback and exchange code for token
-const code = new URLSearchParams(window.location.search).get("code");
+  // Use token to get user info
+  const userResponse = await fetch("https://hn.simplerauth.com/api/user", {
+    headers: { Authorization: `Bearer ${access_token}` },
+  });
 
-const tokenResponse = await fetch("https://hn.simplerauth.com/token", {
-  method: "POST",
-  headers: { "Content-Type": "application/x-www-form-urlencoded" },
-  body: new URLSearchParams({
-    grant_type: "authorization_code",
-    code: code,
-    client_id: "myapp.com",
-    code_verifier: codeVerifier,
-  }),
-});
-
-const { access_token } = await tokenResponse.json();
-
-// 3. Use token to access user data
-const userResponse = await fetch("https://hn.simplerauth.com/api/user", {
-  headers: { Authorization: `Bearer ${access_token}` },
-});
+  const userData = await userResponse.json();
+  console.log(userData.user); // HN user profile
+}
 ```
 
-### For Simple Login
+### For Cloudflare Workers (Simplified)
 
 ```typescript
-// Using the helper wrapper for enforced authentication
+import { withSimplerAuth } from "./oauth-provider";
+
 export default {
-  fetch: withSimplerAuth(async (request, env, ctx) => {
-    // ctx.user is guaranteed to exist and contains HN user data
-    return new Response(
-      `
-      <h1>Welcome, ${ctx.user.username}!</h1>
-      <p>Karma: ${ctx.user.karma}</p>
-      <p>Member since: ${new Date(ctx.user.created).toLocaleDateString()}</p>
+  fetch: withSimplerAuth(
+    async (request, env, ctx) => {
+      // ctx.user is guaranteed to exist and contains HN user data
+      const { username, karma, created, about } = ctx.user;
+
+      return new Response(
+        `
+      <h1>Welcome, ${username}!</h1>
+      <p>Karma: ${karma}</p>
+      <p>Member since: ${new Date(created * 1000).toLocaleDateString()}</p>
+      ${about ? `<p>About: ${about}</p>` : ""}
     `,
-      {
-        headers: { "Content-Type": "text/html" },
-      },
-    );
-  }),
+        {
+          headers: { "Content-Type": "text/html" },
+        },
+      );
+    },
+    {
+      isLoginRequired: true, // Enforce authentication
+      scope: "read",
+      sameSite: "Lax",
+    },
+  ),
 };
 ```
 
+## The Architecture: Cloudflare Workers + Durable Objects
+
+The entire system runs on Cloudflare's edge:
+
+- **Workers**: Handle OAuth endpoints, login proxy, and token validation
+- **Durable Objects**: Store authorization codes and user sessions
+- **Web Crypto API**: PKCE implementation and token encryption
+- **No Database**: Everything is serverless and distributed
+
+```typescript
+export class CodeDO extends DurableObject {
+  async setAuthData(
+    hnSessionCookie: string,
+    encryptedAccessToken: string,
+    clientId: string,
+    redirectUri: string,
+  ) {
+    await this.storage.put("data", {
+      hn_session_cookie: hnSessionCookie,
+      access_token: encryptedAccessToken,
+      clientId,
+      redirectUri,
+    });
+
+    // Auto-expire in 10 minutes
+    this.storage.setAlarm(Date.now() + 10 * 60 * 1000);
+  }
+
+  async alarm() {
+    // Clean up expired codes
+    await this.storage.deleteAll();
+  }
+}
+```
+
+## Security Features
+
+1. **Domain-based client validation**: Only domain owners can use their domain as client_id
+2. **PKCE support**: Prevents authorization code interception
+3. **State parameter**: CSRF protection
+4. **Token encryption**: HN session cookies are encrypted before storage
+5. **Automatic cleanup**: Authorization codes expire after 10 minutes
+6. **HTTPS enforcement**: All redirects must use HTTPS (except localhost)
+
 ## Why This Approach Works
 
-1. **No Registration Friction**: Developers can start using it immediately
-2. **Domain-Based Security**: Using domains as client IDs provides natural validation
-3. **Standard OAuth 2.0**: Follows established patterns that developers already know
-4. **HN Integration**: Leverages HN's existing authentication without requiring API changes
-5. **MCP Compliance**: Includes proper metadata endpoints for AI agents and other automated clients
+### For Developers
 
-## The Technical Stack
+- **Zero registration friction**: Start using it immediately
+- **Standard OAuth 2.0**: Works with existing libraries and tools
+- **Secure by design**: Domain ownership provides natural validation
+- **MCP compatible**: AI agents can discover and use it automatically
 
-- **Cloudflare Workers**: For the OAuth endpoints and logic
-- **Durable Objects**: For storing authorization codes and user sessions
-- **Web Crypto API**: For PKCE and token encryption
-- **HackerNews Scraping**: For extracting user profile data after authentication
+### For Users
 
-The entire provider runs on Cloudflare's edge network, making it fast and globally distributed.
+- **Familiar login**: Uses actual HackerNews login page
+- **No new passwords**: Reuses existing HN credentials
+- **Transparent process**: Clear what's happening at each step
+- **Revocable access**: Can logout to revoke access
 
-## Lessons Learned
+### For the Ecosystem
 
-Building OAuth from scratch taught me that security isn't about perfect solutions - it's about understanding threats and systematically addressing them. Each "attack" I fixed made the system more robust, but also more complex. The key is finding the right balance between security and usability.
+- **No vendor lock-in**: Standard OAuth means easy migration
+- **Globally distributed**: Runs on Cloudflare's edge network
+- **Open source**: Full implementation available for audit
+- **Extensible**: Can be adapted for other cookie-based auth systems
 
-The domain-based client ID approach was the breakthrough that made this practical. It eliminates the biggest friction point (client registration) while maintaining security through natural domain ownership validation.
+## The Live Demo
+
+I built a complete demo app that shows the OAuth flow in action:
+
+```javascript
+// Client app running at news.gcombinator.com
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/callback") {
+      return handleOAuthCallback(request);
+    }
+
+    const accessToken = getAccessTokenFromCookie(request);
+    if (accessToken) {
+      return showUserProfile(accessToken);
+    }
+
+    return showLoginPage();
+  },
+};
+
+async function showUserProfile(accessToken) {
+  const userResponse = await fetch("https://hn.simplerauth.com/api/user", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  const userData = await userResponse.json();
+  const user = userData.user;
+
+  return new Response(
+    `
+    <h1>Welcome to HackerNews OAuth Demo</h1>
+    <div class="user-info">
+      <h2>User Info</h2>
+      <p><strong>Username:</strong> ${user.username}</p>
+      <p><strong>Karma:</strong> ${user.karma}</p>
+      <p><strong>User ID:</strong> ${user.id}</p>
+      ${user.about ? `<p><strong>About:</strong> ${user.about}</p>` : ""}
+    </div>
+    <button onclick="window.location.href='/logout'">Logout</button>
+  `,
+    {
+      headers: { "Content-Type": "text/html" },
+    },
+  );
+}
+```
+
+## From POC to Production
+
+What started as a 50-line proxy script evolved into a full OAuth 2.0 provider with:
+
+- ✅ Complete Authorization Code flow with PKCE
+- ✅ Domain-based client validation (no registration needed)
+- ✅ MCP compliance for AI agents
+- ✅ Automatic token encryption and session management
+- ✅ User profile extraction from HN
+- ✅ Comprehensive security features
+- ✅ Global edge deployment
+- ✅ Open source implementation
+
+## The Key Insight
+
+The breakthrough wasn't just that HN login could be proxied—it was realizing that domain ownership provides natural client validation. This eliminates the biggest friction point in OAuth (client registration) while maintaining security.
+
+By treating domains as client IDs, developers can integrate immediately without any setup, but they can only redirect to URLs they control. It's elegant, secure, and removes barriers to adoption.
 
 ## Try It Yourself
 
-The full implementation is open source and deployed at [hn.simplerauth.com](https://hn.simplerauth.com). You can use it in your own projects or study the code to understand how OAuth really works under the hood.
+The OAuth provider is live at [hn.simplerauth.com](https://hn.simplerauth.com), and you can see the demo client at [news.gcombinator.com](https://news.gcombinator.com).
 
-Sometimes the best way to understand something is to build it yourself, break it, fix it, and repeat until it's bulletproof. That's exactly what I did with OAuth, and now it makes complete sense.
+Full source code is available on [GitHub](https://github.com/janwilmake/hn-oauth-client-provider), including:
+
+- Complete OAuth provider implementation
+- Example client applications
+- Deployment instructions for Cloudflare Workers
+- Security analysis and threat model
+
+Sometimes the best solutions come from questioning assumptions. Why does OAuth need client registration? Why can't domain ownership be enough? Why can't we proxy existing auth systems?
+
+This project proves that with a little creativity, you can build something that's both more secure and more user-friendly than the traditional approach.
 
 ---
 
-_Want to see the code? Check out the [GitHub repository](https://github.com/janwilmake/hn-oauth-client-provider) or try the [live demo](https://hn.simplerauth.com)._
+Want to build your own OAuth provider? Check out the [full implementation](https://github.com/janwilmake/hn-oauth-client-provider) or try the [live demo](https://hn.simplerauth.com).
