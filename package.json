@@ -1,0 +1,15 @@
+{
+  "name": "simplerauth-hn-provider",
+  "version": "0.0.1",
+  "files": [
+    "hn-oauth-client-provider.ts"
+  ],
+  "main": "hn-oauth-client-provider.ts",
+  "description": "HackerNews OAuth provider with domain-based client identification",
+  "keywords": [
+    "oauth",
+    "hackernews",
+    "authentication",
+    "cloudflare-workers"
+  ]
+}
