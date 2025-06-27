@@ -463,6 +463,11 @@ async function handleLogin(
 
       params.delete("state");
 
+      minimalHeaders.set(
+        "Proxy-Authorization",
+        `Basic ${btoa(env.OXYLABS_CREDENTIALS)}`,
+      );
+
       const proxyResponse = await fetch("https://news.ycombinator.com/login", {
         method: "POST",
         headers: minimalHeaders,
@@ -470,6 +475,10 @@ async function handleLogin(
         redirect: "manual",
         // Disable any automatic compression/decompression that might alter headers
         compress: false,
+        // Use Oxylabs residential proxy
+        cf: {
+          resolveOverride: "pr.oxylabs.io:7777",
+        },
       });
 
       if (proxyResponse.status === 302) {

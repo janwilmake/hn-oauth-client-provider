@@ -92,7 +92,27 @@ export default {
 <html lang="en">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Building a HackerNews OAuth Provider - simpler auth</title>
+<title>Building a HackerNews OAuth Provider from First Principles</title>
+<meta name="description" content="How a weekend hack evolved into a production-ready OAuth provider (but then I got blocked)" />
+<meta name="robots" content="index, follow" />
+
+<!-- Facebook Meta Tags -->
+<meta property="og:url" content="https://https://hn.simplerauth.com/blog" />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Building a HackerNews OAuth Provider from First Principles" />
+<meta property="og:description" content="How a weekend hack evolved into a production-ready OAuth provider (but then I got blocked)" />
+<meta property="og:image" content="https://quickog.com/screenshot/https://hn.simplerauth.com/blog" />
+<meta property="og:image:alt" content="How a weekend hack evolved into a production-ready OAuth provider (but then I got blocked)"/>
+<meta property="og:image:width" content="1200"/>
+<meta property="og:image:height" content="630"/>
+
+<!-- Twitter Meta Tags -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta property="twitter:domain" content="https://hn.simplerauth.com/blog" />
+<meta property="twitter:url" content="https://https://hn.simplerauth.com/blog" />
+<meta name="twitter:title" content="Building a HackerNews OAuth Provider from First Principles" />
+<meta name="twitter:description" content="How a weekend hack evolved into a production-ready OAuth provider (but then I got blocked)" />
+<meta name="twitter:image" content="https://quickog.com/screenshot/https://hn.simplerauth.com/blog" />
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>

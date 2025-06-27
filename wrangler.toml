@@ -5,6 +5,7 @@ route.pattern = "hn.simplerauth.com"
 main = "landing.ts"
 assets.directory = "./public"
 assets.binding = "ASSETS"
+dev.port = 3001
 
 [[durable_objects.bindings]]
 name = "CODES"
